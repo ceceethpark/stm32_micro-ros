@@ -26,3 +26,6 @@ Release/
 # OS files
 .DS_Store
 Thumbs.db
+
+# External submodules
+micro_ros_stm32cubemx_utils/
