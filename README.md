@@ -1,13 +1,17 @@
 # STM32F405 micro-ROS Robot Control System
 
-STM32F405RGTx 기반 micro-ROS 로봇 제어 시스템 프로젝트입니다. FreeRTOS와 micro-ROS를 활용하여 듀얼 모터 제어, 센서 데이터 수집, ROS2 통신을 지원합니다.
+STM32F405RGT6 기반 micro-ROS 로봇 제어 시스템 프로젝트입니다. FreeRTOS와 micro-ROS를 활용하여 듀얼 모터 제어, 센서 데이터 수집, ROS2 통신을 지원합니다.
 
 ## 주요 기능
 
 ### 하드웨어 구성
-- **MCU**: STM32F405RGTx (ARM Cortex-M4, 168MHz)
-- **RTOS**: FreeRTOS
-- **통신**: USB CDC (디버그), UART3 (micro-ROS Agent)
+- **MCU**: STM32F405RGT6 (LQFP64)
+  - ARM Cortex-M4F, 168MHz
+  - 1MB Flash, 128KB SRAM
+  - FPU 지원
+- **클럭**: 8MHz HSE → 168MHz SYSCLK, 48MHz USB
+- **RTOS**: FreeRTOS (CMSIS-RTOS v2, 48KB Heap)
+- **통신**: SWO (디버그 printf), UART2 (micro-ROS Agent)
 
 ### 모터 제어
 - **PWM 제어**: Timer1 complementary outputs (CH1/CH1N, CH2/CH2N)
@@ -96,9 +100,13 @@ class/
 - MOSI (PA7): IMU Data Out
 - CS (PA4): IMU Chip Select
 
-### UART3
-- TX (PB10): micro-ROS Agent
-- RX (PB11): micro-ROS Agent
+### UART2
+- TX (PA2 / U6.16): micro-ROS Agent
+- RX (PA3 / U2.17): micro-ROS Agent
+
+### UART3 (미사용)
+- TX (PB10): Reserved
+- RX (PB11): Reserved
 
 ### GPIO
 - PC4: LED_GREEN
@@ -133,8 +141,11 @@ text      data     bss     dec     hex filename
 
 ### Agent 연결
 ```bash
-# UART3 (115200 baud)
+# UART2 (115200 baud) - U6.16/U2.17
 ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
+
+# Docker 사용
+docker run -it --rm --device=/dev/ttyUSB0 microros/micro-ros-agent:humble serial --dev /dev/ttyUSB0 -b 115200
 ```
 
 ### ROS2 토픽
@@ -145,13 +156,326 @@ ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
 
 ## 디버그
 
-### USB CDC Printf
-- USB 가상 COM 포트를 통한 printf 출력
-- 초기화 메시지 및 센서 상태 확인
+### SWO (Serial Wire Output) Printf
+- **변경일**: 2025.12.04
+- **변경 이유**: UART2를 micro-ROS agent와 겸용 불가, SWO로 분리
+- **핀**: PB3 (JTDO/TRACESWO)
+- ST-Link SWO 핀 연결 필요
+- STM32CubeIDE SWV ITM Data Console에서 확인
+
+**설정:**
+- Debug Configuration → Serial Wire Viewer (SWV) 활성화
+- Core Clock: 168 MHz
+- SWO Clock: 2000 kHz
+- ITM Stimulus Port 0 활성화
 
 ```c
-printf("===================================\n");
-printf("STM32F405 micro-ROS System Started\n");
+// SWO printf 리다이렉션 (U6.55)
+int _write(int32_t file, uint8_t *ptr, int32_t len) {
+    for(int i = 0; i < len; i++) {
+        ITM_SendChar(ptr[i]);
+    }
+    return len;
+}
+```
+
+### 통신 포트 할당
+- **UART2**: micro-ROS Agent 전용 (115200 baud)
+  - TX: U2TX (U6.16)
+  - RX: U2RX (U2.17)
+- **UART3**: 사용 안 함 (이전: micro-ROS Agent)
+- **SWO (PB3)**: printf 디버그 출력 (U6.55)
+
+## WSL2 환경 설정
+
+### WSL 기본 명령어
+
+**Windows PowerShell에서:**
+```powershell
+# WSL 실행
+wsl
+
+# 특정 배포판 실행
+wsl -d Ubuntu-24.04
+
+# WSL 완전 종료 (설정 적용 시 필요)
+wsl --shutdown
+
+# WSL 상태 확인
+wsl --list --verbose
+
+# 실행 중인 WSL 배포판 확인
+wsl --list --running
+```
+
+**WSL(Linux) 내부에서:**
+```bash
+# 현재 터미널만 종료
+exit
+
+# 또는
+logout
+
+# Linux 시스템 종료 (WSL 전체 종료, 권장하지 않음)
+sudo shutdown -h now
+sudo poweroff
+```
+
+**참고:** `.wslconfig` 파일 변경 후에는 반드시 Windows PowerShell에서 `wsl --shutdown`을 실행해야 설정이 적용됩니다.
+
+### 1. MicroXRCEAgent 설치
+
+```bash
+# WSL에서 소스 빌드
+git clone https://github.com/eProsima/Micro-XRCE-DDS-Agent.git
+cd Micro-XRCE-DDS-Agent
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+sudo make install
+```
+
+### 2. USB 장치 WSL 연결
+
+Windows PowerShell (관리자 권한):
+
+```powershell
+# USB 장치 목록 확인
+usbipd list
+
+# USB 장치 바인딩 (최초 1회)
+usbipd bind --busid 3-4
+
+# WSL에 연결
+usbipd attach --wsl --busid 3-4
+```
+
+WSL에서 확인:
+```bash
+ls /dev/ttyUSB0
+```
+
+### 3. Agent 실행
+
+```bash
+# Client key 20으로 실행
+sudo MicroXRCEAgent serial --dev /dev/ttyUSB0 -b 921600 --key 20 -v6
+```
+
+### 4. ROS2 환경 설정
+
+```bash
+# ROS2 Jazzy 설치 (Ubuntu 24.04)
+sudo apt install ros-jazzy-ros-base
+
+# 환경 설정
+source /opt/ros/jazzy/setup.bash
+
+# Domain ID 설정 (다른 기기와 맞춰야 함)
+export ROS_DOMAIN_ID=20
+```
+
+### 5. Cyclone DDS 설치 및 설정
+
+```bash
+# Cyclone DDS 설치
+sudo apt install ros-jazzy-rmw-cyclonedds-cpp
+
+# 환경 변수 설정
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+```
+
+## WSL2 네트워크 설정 (로컬 네트워크 통신)
+
+WSL2는 기본적으로 NAT 네트워크(172.x.x.x)를 사용하여 로컬 네트워크(192.168.0.x)와 직접 통신할 수 없습니다. 
+로컬 네트워크의 다른 ROS2 기기와 통신하려면 다음 설정이 필요합니다.
+
+### 방법 1: WSL Mirrored Networking (권장 - Windows 11만 해당)
+
+**요구사항**: Windows 11 22H2 (Build 22621) 이상
+
+**⚠️ 주의**: Windows 10에서는 이 방법을 사용할 수 없습니다. Windows 10 사용자는 **방법 2 (Cyclone DDS Peer 설정)**을 사용하세요.
+
+**1. `.wslconfig` 파일 생성**
+
+PowerShell에서:
+```powershell
+@"
+[wsl2]
+networkingMode=mirrored
+dhcp=true
+"@ | Out-File -FilePath "$env:USERPROFILE\.wslconfig" -Encoding utf8
+```
+
+또는 수동으로 `C:\Users\사용자명\.wslconfig` 파일 생성:
+```ini
+[wsl2]
+networkingMode=mirrored
+dhcp=true
+```
+
+**2. WSL 재시작**
+
+PowerShell에서:
+```powershell
+wsl --shutdown
+```
+
+그 후 WSL을 다시 실행하면 WSL이 Windows와 같은 192.168.0.x 네트워크를 사용합니다.
+
+**3. IP 확인**
+
+```bash
+ip addr show eth0
+# 이제 192.168.0.x 대역 IP를 받습니다
+```
+
+### 방법 2: Hyper-V External Switch (Bridged Mode) - 실험적
+
+**⚠️ 복잡하고 불안정할 수 있음 - Windows 10에서 방법 3 권장**
+
+**1. Hyper-V 설치 및 External Switch 생성**
+
+PowerShell (관리자 권한):
+```powershell
+# Hyper-V 기능 활성화
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All
+
+# External Switch 생성 (물리적 네트워크 어댑터 선택)
+New-VMSwitch -Name "WSLBridge" -NetAdapterName "이더넷" -AllowManagementOS $true
+```
+
+**2. `.wslconfig` 파일 생성**
+
+PowerShell에서:
+```powershell
+@"
+[wsl2]
+networkingMode=bridged
+vmSwitch=WSLBridge
+dhcp=true
+"@ | Out-File -FilePath "$env:USERPROFILE\.wslconfig" -Encoding utf8
+```
+
+**3. WSL 재시작 및 확인**
+
+```powershell
+wsl --shutdown
+wsl
+```
+
+WSL 내부에서:
+```bash
+ip addr show eth0
+# 192.168.0.x 대역 IP를 받아야 함
+```
+
+**⚠️ 주의사항:**
+- vEthernet 어댑터는 DHCP 설정 불가 (정상 동작)
+- Windows 네트워크 위치를 "개인 네트워크"로 설정해야 방화벽 문제 없음
+  - 설정 → 네트워크 및 인터넷 → 이더넷/Wi-Fi → 네트워크 프로필: "개인"
+- External Switch 생성 시 인터넷이 일시적으로 끊길 수 있음
+- 불안정한 경우 **방법 3 (Cyclone DDS Peer)** 사용 권장
+
+### 방법 3: Cyclone DDS Peer 설정 (가장 안정적)
+
+**✅ Windows 10 권장 방법 - 가장 간단하고 안정적**
+
+WSL IP가 172.x.x.x 대역인 경우, peer 설정으로 해결:
+
+**WSL IP 확인:**
+```bash
+ip addr show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1
+# 예: 172.22.133.211
+```
+
+**WSL에서 cyclonedds.xml 생성:**
+
+```bash
+cat > ~/cyclonedds.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS xmlns="https://cdds.io/config">
+    <Domain>
+        <General>
+            <NetworkInterfaceAddress>auto</NetworkInterfaceAddress>
+            <AllowMulticast>false</AllowMulticast>
+        </General>
+        <Discovery>
+            <Peers>
+                <Peer address="192.168.0.154"/>
+            </Peers>
+        </Discovery>
+    </Domain>
+</CycloneDDS>
+EOF
+
+export CYCLONEDDS_URI=file://$HOME/cyclonedds.xml
+```
+
+**다른 ROS2 기기(예: 192.168.0.154)에서도 WSL IP를 peer로 추가:**
+
+```bash
+cat > ~/cyclonedds.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS xmlns="https://cdds.io/config">
+    <Domain>
+        <General>
+            <NetworkInterfaceAddress>auto</NetworkInterfaceAddress>
+            <AllowMulticast>false</AllowMulticast>
+        </General>
+        <Discovery>
+            <Peers>
+                <Peer address="172.22.133.211"/>
+            </Peers>
+        </Discovery>
+    </Domain>
+</CycloneDDS>
+EOF
+
+export CYCLONEDDS_URI=file://$HOME/cyclonedds.xml
+```
+
+### 영구 환경 변수 설정
+
+`~/.bashrc`에 추가:
+
+```bash
+echo 'export ROS_DOMAIN_ID=20' >> ~/.bashrc
+echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> ~/.bashrc
+echo 'export CYCLONEDDS_URI=file://$HOME/cyclonedds.xml' >> ~/.bashrc
+source ~/.bashrc
+```
+
+## ROS2 명령어
+
+### Topic 확인
+
+```bash
+# 환경 설정
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=20
+
+# Topic 목록 확인
+ros2 topic list
+
+# Topic 데이터 모니터링
+ros2 topic echo /int32_publisher
+
+# Node 목록 확인
+ros2 node list
+
+# Node 정보 확인
+ros2 node info /stm32_node
+```
+
+### 데이터 발행 테스트
+
+```bash
+# STM32로 Int32 데이터 전송
+ros2 topic pub /int32_subscriber std_msgs/msg/Int32 "{data: 100}"
+
+# cmd_vel 명령 전송
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
 ```
 
 ## 개발 이력
@@ -177,9 +501,64 @@ printf("STM32F405 micro-ROS System Started\n");
 - LED를 ControlTask에 통합 (10ms 업데이트)
 - 1Hz 그린 LED 하트비트
 
-### 2025.12
+### 2025.12 초
 - Git 저장소 초기화
 - GitHub 업로드 (ceceethpark/stm32_micro-ros)
+- FreeRTOS 멀티태스킹 안정화 (Control/Sensor/MicroROS 독립 동작)
+- printf를 SWO(PB3)로 변경하여 UART 충돌 해결 (U6.55)
+
+### 2025.12.04
+- UART 재설정: UART2(micro-ROS, 921600), UART6(printf)
+- micro-ROS client key 20 설정
+- WSL2 MicroXRCEAgent 설치 및 설정
+- ROS2 Jazzy 설치 (Ubuntu 24.04)
+- WSL2 네트워크 설정 (Mirrored Networking / Cyclone DDS Peer)
+
+### 2025.12.05
+- Hyper-V External Switch (Bridged Mode) 테스트 및 문서화
+- vEthernet DHCP 제약 및 네트워크 위치 설정 이슈 해결
+- Windows 네트워크 프로필 "개인" 설정으로 방화벽 문제 해결
+- WSL2 네트워크 방법 우선순위 재정리 (Cyclone DDS Peer 가장 안정적)
+- **WSL2 Ubuntu 22.04 + ROS2 Humble 환경 구축 성공**
+  - Windows 10에서 Hyper-V Bridged Mode 사용하여 WSL을 192.168.0.65로 구성
+  - ROS2 버전 호환성 해결: 192.168.0.101 (Humble) ↔ WSL 192.168.0.65 (Humble)
+  - Multicast 기반 노드 디스커버리 정상 작동 확인
+  - 중복 노드 문제 발견: 192.168.0.101이 eth0 + wlan0 동시 사용으로 인한 이슈
+
+## 트러블슈팅
+
+### WSL2 ROS2 통신 문제 해결 과정
+
+#### 문제 1: WSL에서 ROS2 노드 발견 불가
+- **증상**: `ros2 node list` 실행 시 빈 결과
+- **원인**: WSL2 기본 NAT 네트워크(172.x.x.x)는 로컬 네트워크(192.168.0.x)와 multicast 통신 불가
+- **해결**: Hyper-V Bridged Mode 적용하여 WSL을 192.168.0.65로 구성
+
+#### 문제 2: ROS2 버전 불일치로 인한 노드 크래시
+- **증상**: WSL(Jazzy)에서 메시지 발행 시 192.168.0.101(Humble) 노드 크래시 및 재부팅 필요
+- **원인**: ROS2 Jazzy와 Humble 간 메시지 호환성 문제
+- **해결**: WSL에 Ubuntu 22.04 + ROS2 Humble 재설치
+
+#### 문제 3: 노드 디스커버리는 되지만 메시지 전달 안 됨
+- **증상**: `ros2 topic list` 정상, 중복 노드 경고, WSL → 101 메시지 미전달
+- **원인**: 192.168.0.101이 eth0(유선) + wlan0(무선) 동시 사용으로 중복 디스커버리
+- **해결 방안**:
+  1. WiFi 비활성화: `sudo rfkill block wifi`
+  2. Cyclone DDS에서 eth0만 사용하도록 설정
+
+#### 최종 성공 구성
+```
+Windows 10
+└── WSL2 Ubuntu 22.04 (192.168.0.65) - Bridged Mode
+    ├── ROS2 Humble
+    ├── Cyclone DDS (multicast)
+    └── Domain ID: 20
+    
+로컬 네트워크
+├── 192.168.0.101 (Raspberry Pi, Humble) - 로봇
+├── 192.168.0.154 (Humble) - 원격 제어
+└── 192.168.0.65 (WSL2, Humble) - 개발 환경
+```
 
 ## 라이선스
 

@@ -5,6 +5,7 @@
  *      Author: thpark
  */
 #include "microros_class.h"
+#include "extern.h"
 
 // External transport functions (defined in Core/Src/microros_transports/dma_transport.c)
 extern "C" {
@@ -46,6 +47,8 @@ microros_class::~microros_class() {
 }
 
 bool microros_class::init() {
+    printf("[MICROROS] Setting up UART transport...\r\n");
+    
     // Set custom transport for UART
     rmw_uros_set_custom_transport(
         true,
@@ -54,8 +57,11 @@ bool microros_class::init() {
         cubemx_transport_close,
         cubemx_transport_write,
         cubemx_transport_read);
+    
+    printf("[MICROROS] Transport configured\r\n");
 
     // Set FreeRTOS allocator
+    printf("[MICROROS] Setting up FreeRTOS allocator...\r\n");
     rcl_allocator_t freeRTOS_allocator = rcutils_get_zero_initialized_allocator();
     freeRTOS_allocator.allocate = microros_allocate;
     freeRTOS_allocator.deallocate = microros_deallocate;
@@ -63,24 +69,36 @@ bool microros_class::init() {
     freeRTOS_allocator.zero_allocate = microros_zero_allocate;
 
     if (!rcutils_set_default_allocator(&freeRTOS_allocator)) {
+        printf("[MICROROS] ERROR: Failed to set allocator\r\n");
         return false;
     }
+    printf("[MICROROS] Allocator configured\r\n");
 
     // Get default allocator
     allocator = rcl_get_default_allocator();
 
+    // Set client key to 20
+    printf("[MICROROS] Setting client key to 20...\r\n");
+    rmw_uros_options_set_client_key(20, (void *) huart);
+
     // Create init_options and wait for agent connection
+    printf("[MICROROS] Waiting for ROS2 agent connection...\r\n");
     rcl_ret_t ret = rclc_support_init(&support, 0, NULL, &allocator);
     
     if (ret != RCL_RET_OK) {
+        printf("[MICROROS] ERROR: Agent connection failed (ret=%d)\r\n", ret);
         return false;
     }
+    printf("[MICROROS] Agent connected!\r\n");
 
     // Create node
+    printf("[MICROROS] Creating ROS2 node...\r\n");
     ret = rclc_node_init_default(&node, node_name, "", &support);
     if (ret != RCL_RET_OK) {
+        printf("[MICROROS] ERROR: Node creation failed (ret=%d)\r\n", ret);
         return false;
     }
+    printf("[MICROROS] Node created: %s\r\n", node_name);
 
     // Create executor (count subscriptions)
     int num_subscriptions = 0;

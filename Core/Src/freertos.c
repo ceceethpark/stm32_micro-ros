@@ -55,5 +55,35 @@
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
+// FreeRTOS Hook Functions for debugging
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+  // Stack overflow detected - blink RED LED rapidly
+  (void)xTask;
+  (void)pcTaskName;
+  
+  __disable_irq();
+  while(1) {
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_5);  // RED LED
+    for(volatile uint32_t i=0; i<200000; i++);
+  }
+}
+
+void vApplicationMallocFailedHook(void)
+{
+  // Memory allocation failed - blink RED LED very rapidly
+  __disable_irq();
+  while(1) {
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_5);  // RED LED
+    for(volatile uint32_t i=0; i<100000; i++);
+  }
+}
+
+void vApplicationIdleHook(void)
+{
+  // Idle task is running - everything OK
+  // Can add power saving code here later
+}
+
 /* USER CODE END Application */
 

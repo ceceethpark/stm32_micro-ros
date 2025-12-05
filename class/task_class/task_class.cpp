@@ -19,18 +19,11 @@ task_class::task_class(UART_HandleTypeDef* uart, SPI_HandleTypeDef* spi)
     // Set static instance
     instance = this;
     
-    // Initialize DataClass
-    pDataClass = new DataClass(100);
-    pDataClass->setTemperature(25.5f);
-    pDataClass->setIsActive(true);
+    printf("[INIT] TaskManager constructor - minimal init\r\n");
     
-    // Initialize IMU Sensor (SPI1, CS pin: PB0 from pinout image)
+    // Initialize IMU Sensor (SPI1, CS pin: PA4 from pinout)
     pImuSensor = new sensor_imu_class(hspi, SPI1_CS_GPIO_Port, SPI1_CS_Pin);
-    
-    // Initialize LED
-    pLed = new led_class();
-    // Start heartbeat blink on GREEN LED (1Hz)
-    pLed->led_blink(LED_GREEN, 1000);
+    printf("[INIT] IMU sensor created at: %p\r\n", pImuSensor);
 }
 
 task_class::~task_class()
@@ -60,195 +53,92 @@ bool task_class::initQueues()
 
 void task_class::runMicroRosTask()
 {
-    // MicroRos 객체 생성 및 초기화
-    pMicroRos = new microros_class(huart, "stm32f405_node", 
-                                   "debug_counter", nullptr, "cmd_vel");
+    printf("[MICROROS] Start\r\n");
+    
+    uint32_t microros_count = 0;
+    
+    // MicroROS agent 연결 (UART2, 921600 baud)
+    printf("[MICROROS] Waiting for agent...\r\n");
+    pMicroRos = new microros_class(huart, "stm32_node", "int32_publisher", "int32_subscriber", "cmd_vel");
     
     if (!pMicroRos->init()) {
+        printf("[MICROROS] Init failed!\r\n");
         Error_Handler();
     }
-
-    // cmd_vel 콜백 설정 - Queue로 데이터 전달
-    pMicroRos->setCmdVelCallback([](const void* msg) {
-        const geometry_msgs__msg__Twist* twist = (const geometry_msgs__msg__Twist*)msg;
-        
-        CmdVelData_t cmdVelData;
-        cmdVelData.linear_x = twist->linear.x;
-        cmdVelData.linear_y = twist->linear.y;
-        cmdVelData.angular_z = twist->angular.z;
-        
-        // Queue에 cmd_vel 데이터 전송 (ControlTask로)
-        if (instance && instance->cmdVelQueueHandle) {
-            osMessageQueuePut(instance->cmdVelQueueHandle, &cmdVelData, 0, 0);
-        }
-    });
-
-    // Main loop
+    
+    printf("[MICROROS] Agent connected!\r\n");
+    
     for(;;)
     {
-        // cmd_vel 메시지 처리 (executor spin)
+        // Executor spin
         if (pMicroRos != nullptr) {
             pMicroRos->spin();
         }
         
-        // Queue에서 IMU 데이터 받아서 publish
+        // Queue 비우기
         ImuData_t imuData;
-        if (osMessageQueueGet(imuDataQueueHandle, &imuData, NULL, 0) == osOK) {
-            // TODO: Publish IMU data to ROS
-            // pMicroRos->publishImu(&imuData);
-        }
+        osMessageQueueGet(imuDataQueueHandle, &imuData, NULL, 0);
         
-        // Queue에서 Encoder 데이터 받아서 publish
         EncoderData_t encoderData;
-        if (osMessageQueueGet(encoderDataQueueHandle, &encoderData, NULL, 0) == osOK) {
-            // TODO: Publish Encoder data to ROS
-            // pMicroRos->publishEncoder(&encoderData);
-        }
+        osMessageQueueGet(encoderDataQueueHandle, &encoderData, NULL, 0);
         
-        // Queue에서 FET Temperature 데이터 받아서 publish
         FetTempData_t fetTempData;
-        if (osMessageQueueGet(fetTempQueueHandle, &fetTempData, NULL, 0) == osOK) {
-            // TODO: Publish FET Temperature to ROS (std_msgs/Float32)
-            // pMicroRos->publishFetTemp(fetTempData.temperature);
-        }
+        osMessageQueueGet(fetTempQueueHandle, &fetTempData, NULL, 0);
         
         // Debug counter publish
         if (pDataClass != nullptr && pMicroRos != nullptr) {
             int32_t data = pDataClass->getData();
             pMicroRos->publish(data);
             pDataClass->incrementData();
+            
+            if (microros_count % 100 == 0) {
+                printf("[MICROROS] Publishing: %ld\r\n", data);
+            }
         }
         
-        osDelay(50);  // 20Hz publish rate
+        microros_count++;
+        osDelay(50);
     }
 }
 
 void task_class::runControlTask()
 {
-    // PWM Motor 초기화 (ADC1 for current sensing, TIM1 for PWM)
-    pPwmMotor = new pwm_dcmotor_class(&hadc1, &htim1);
+    printf("[CONTROL] Start\r\n");
     
-    // Encoder 초기화 (Timer3 for Motor1, Timer4 for Motor2)
-    pEncoder = new sensor_encoder_class(&htim3, &htim4, ENCODER_PPR);
-    
-    // 초기화 대기
     osDelay(100);
+    printf("[CONTROL] Init done\r\n");
     
-    CmdVelData_t cmdVelData;
-    cmdVelData.linear_x = 0.0f;
-    cmdVelData.linear_y = 0.0f;
-    cmdVelData.angular_z = 0.0f;
+    pPwmMotor = nullptr;
+    pEncoder = nullptr;
+    uint32_t control_count = 0;
     
-    // Main loop - 10ms cycle (100Hz)
     for(;;)
     {
-        // Queue에서 cmd_vel 데이터 수신 (non-blocking)
-        if (osMessageQueueGet(cmdVelQueueHandle, &cmdVelData, NULL, 0) == osOK) {
-            // 새로운 cmd_vel 수신됨
+        if (control_count % 50 == 0) {
+            printf("[CONTROL] Count: %lu\r\n", control_count);
         }
         
-        // cmd_vel 데이터를 모터 속도로 변환
-        if (pPwmMotor != nullptr) {
-            // linear.x: 전진/후진 속도 (-1.0 ~ +1.0)
-            // angular.z: 회전 속도 (-1.0 ~ +1.0)
-            
-            int speed_left = (int)((cmdVelData.linear_x - cmdVelData.angular_z) * 100.0f);
-            int speed_right = (int)((cmdVelData.linear_x + cmdVelData.angular_z) * 100.0f);
-            
-            pPwmMotor->PwmMotor_Set_Speed(MOTOR_1, speed_left);    // Left motor
-            pPwmMotor->PwmMotor_Set_Speed(MOTOR_2, speed_right);  // Right motor
-            
-            // PWM 업데이트
-            pPwmMotor->pwm_update();
-        }
-        
-        // Encoder RPM 업데이트 및 퍼블리시
-        if (pEncoder != nullptr) {
-            pEncoder->update_rpm();
-            pEncoder->publish_rpm();
-        }
-        
-        // LED 업데이트 (blink 처리)
-        if (pLed != nullptr) {
-            pLed->update();
-        }
-        
-        osDelay(10);  // 10ms cycle (100Hz control loop)
+        control_count++;
+        osDelay(10);
     }
 }
 
 void task_class::runSensorTask()
 {
-    // 센서 초기화 대기
-    osDelay(200);
+    printf("[SENSOR] Start\r\n");
     
-    // IMU 센서 초기화
-    bool imu_initialized = false;
-    if (pImuSensor != nullptr) {
-        if (pImuSensor->init()) {
-            imu_initialized = true;
-            // WHO_AM_I 확인
-            uint8_t whoami = pImuSensor->getWhoAmI();
-            // whoami == 0x67 이면 정상
-        }
-    }
+    uint32_t sensor_count = 0;
     
-    // FET Temperature 센서 초기화 (ADC1)
-    pFetTemp = new sensor_fettemp_class(&hadc1);
+    printf("[SENSOR] Loop\r\n");
     
-    ImuData_t imuData;
-    ImuRawData_t imuRawData;
-    EncoderData_t encoderData;
-    
-    // Main loop - 50ms cycle (20Hz)
     for(;;)
     {
-        // IMU 센서 읽기
-        if (imu_initialized && pImuSensor != nullptr) {
-            if (pImuSensor->readImuData(&imuRawData)) {
-                // Convert ImuRawData_t to ImuData_t for Queue
-                imuData.accel_x = imuRawData.accel_x;
-                imuData.accel_y = imuRawData.accel_y;
-                imuData.accel_z = imuRawData.accel_z;
-                imuData.gyro_x = imuRawData.gyro_x;
-                imuData.gyro_y = imuRawData.gyro_y;
-                imuData.gyro_z = imuRawData.gyro_z;
-            }
-        } else {
-            // IMU 초기화 실패 시 기본값
-            imuData.accel_x = 0.0f;
-            imuData.accel_y = 0.0f;
-            imuData.accel_z = 9.81f;
-            imuData.gyro_x = 0.0f;
-            imuData.gyro_y = 0.0f;
-            imuData.gyro_z = 0.0f;
+        if (sensor_count % 10 == 0) {
+            printf("[SENSOR] Count: %lu\r\n", sensor_count);
         }
         
-        // Queue로 IMU 데이터 전송 (MicroRosTask로)
-        osMessageQueuePut(imuDataQueueHandle, &imuData, 0, 0);
-        
-        // Encoder 읽기
-        // TODO: Read actual encoder values
-        encoderData.left_encoder = 0;
-        encoderData.right_encoder = 0;
-        
-        // Queue로 Encoder 데이터 전송 (MicroRosTask로)
-        osMessageQueuePut(encoderDataQueueHandle, &encoderData, 0, 0);
-        
-        // FET Temperature 읽기
-        if (pFetTemp != nullptr) {
-            pFetTemp->update_temperature();
-            pFetTemp->publish_temperature();
-            
-            FetTempData_t fetTempData;
-            fetTempData.temperature = pFetTemp->get_temperature();
-            fetTempData.adc_raw = pFetTemp->get_adc_raw();
-            
-            // Queue로 Temperature 데이터 전송 (MicroRosTask로)
-            osMessageQueuePut(fetTempQueueHandle, &fetTempData, 0, 0);
-        }
-        
-        osDelay(50);  // 50ms cycle (20Hz sensor reading)
+        sensor_count++;
+        osDelay(50);
     }
 }
 

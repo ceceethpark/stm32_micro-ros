@@ -22,7 +22,8 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
-
+// Forward declaration for DFU bootloader jump function
+extern void JumpToBootloader(void);
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -261,6 +262,23 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
+  
+  // Check for DFU command: "DFU\r\n" or "DFU\n"
+  if (*Len >= 3) {
+    if (Buf[0] == 'D' && Buf[1] == 'F' && Buf[2] == 'U') {
+      // Send confirmation message
+      uint8_t msg[] = "Entering DFU mode...\r\n";
+      CDC_Transmit_FS(msg, sizeof(msg) - 1);
+      HAL_Delay(100);  // Wait for message to send
+      
+      // Jump to system bootloader
+      JumpToBootloader();
+    }
+  }
+  
+  // Echo received data (for testing)
+  CDC_Transmit_FS(Buf, *Len);
+  
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
   return (USBD_OK);

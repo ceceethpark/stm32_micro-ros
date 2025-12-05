@@ -23,7 +23,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdarg.h>
 #include <stdio.h>
 #include "extern.h"
 
@@ -50,10 +49,12 @@ ADC_HandleTypeDef hadc1;
 SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim1;
-TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
 
+UART_HandleTypeDef huart4;
+UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
+UART_HandleTypeDef huart6;
 
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -70,22 +71,22 @@ task_class* pTaskManager = nullptr;
 osThreadId_t microRosTaskHandle;
 const osThreadAttr_t microRosTask_attributes = {
   .name = "MicroRosTask",
-  .stack_size = 10240,
+  .stack_size = 6144,  // 6KB - reduced for memory optimization
   .priority = (osPriority_t) osPriorityNormal,
 };
 
 osThreadId_t controlTaskHandle;
 const osThreadAttr_t controlTask_attributes = {
   .name = "ControlTask",
-  .stack_size = 1024,
+  .stack_size = 2048,  // Increased for motor/encoder operations
   .priority = (osPriority_t) osPriorityHigh,
 };
 
 osThreadId_t sensorTaskHandle;
 const osThreadAttr_t sensorTask_attributes = {
   .name = "SensorTask",
-  .stack_size = 1024,
-  .priority = (osPriority_t) osPriorityLow,
+  .stack_size = 2048,  // Increased for IMU sensor initialization
+  .priority = (osPriority_t) osPriorityNormal,  // Changed from Low to Normal
 };
 /* USER CODE END PV */
 
@@ -96,31 +97,83 @@ static void MX_SPI1_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_USART3_UART_Init(void);
-static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
+static void MX_UART4_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_USART6_UART_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-// USB CDC printf support
-extern "C" uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
+// Jump to DFU bootloader function (C linkage for use in usbd_cdc_if.c)
+#ifdef __cplusplus
+extern "C" {
+#endif
+void JumpToBootloader(void);
+#ifdef __cplusplus
+}
+#endif
 
-// Redirect printf to USB CDC (UART3 is used for micro-ros agent communication)
+// Redirect printf to UART6 (debug output)
 #ifdef __cplusplus
 extern "C" int _write(int32_t file, uint8_t *ptr, int32_t len)
 {
 #else
 int _write(int32_t file, uint8_t *ptr, int32_t len) {
 #endif
-	// Use USB CDC for printf output
-	if (CDC_Transmit_FS(ptr, len) == USBD_OK)
-		return len;
-	else
-		return 0;
+	// Use UART6 for printf output
+	HAL_UART_Transmit(&huart6, ptr, len, HAL_MAX_DELAY);
+	return len;
 }
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+// DFU mode can be entered by sending "DFU" command via USB CDC
+
+// Jump to System Memory (DFU Bootloader) for STM32F405
+// This allows entering DFU mode via USB command without changing BOOT0 pin
+void JumpToBootloader(void)
+{
+    // Disable all interrupts
+    __disable_irq();
+    
+    // System memory start address for STM32F405
+    uint32_t bootloader_address = 0x1FFF0000;
+    
+    // Deinitialize all peripherals
+    HAL_RCC_DeInit();
+    HAL_DeInit();
+    
+    // Disable SysTick
+    SysTick->CTRL = 0;
+    SysTick->LOAD = 0;
+    SysTick->VAL = 0;
+    
+    // Clear all interrupt pending flags
+    for (int i = 0; i < 8; i++) {
+        NVIC->ICER[i] = 0xFFFFFFFF;
+        NVIC->ICPR[i] = 0xFFFFFFFF;
+    }
+    
+    // Remap system memory to 0x00000000
+    __HAL_RCC_SYSCFG_CLK_ENABLE();
+    __HAL_SYSCFG_REMAPMEMORY_SYSTEMFLASH();
+    
+    // Get stack pointer and reset handler from bootloader
+    uint32_t stack_pointer = *(__IO uint32_t*)bootloader_address;
+    uint32_t jump_address = *(__IO uint32_t*)(bootloader_address + 4);
+    
+    // Set stack pointer
+    __set_MSP(stack_pointer);
+    
+    // Jump to bootloader
+    void (*bootloader)(void) = (void (*)(void))jump_address;
+    bootloader();
+    
+    // Should never reach here
+    while(1);
+}
 
 /* USER CODE END 0 */
 
@@ -132,7 +185,19 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  // Early hardware init for DFU check
+  RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+  GPIOC->MODER |= (1<<8) | (1<<10);  // PC4, PC5 as output
+  
+  // Simple DFU trigger: If both LEDs would be forced HIGH externally, enter DFU
+  // This allows BOOT0=3.3V but still runs application normally
+  // To enter DFU: Connect specific GPIO (future: button) to GND, then reset
+  
+  // For now: Just run application (BOOT0 can stay at 3.3V with code workaround)
+  // The bootloader at 0x1FFF0000 only runs if we jump to it explicitly
+  
+  // Early boot indicator
+  GPIOC->BSRR = (1<<4) | (1<<5);  // LEDs ON at boot
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -141,7 +206,11 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  GPIOC->BSRR = (1<<20) | (1<<21);  // LEDs OFF after HAL_Init
+  for(volatile int i=0; i<1000000; i++);
+  GPIOC->BSRR = (1<<4) | (1<<5);  // LEDs ON
+  for(volatile int i=0; i<1000000; i++);
+  GPIOC->BSRR = (1<<20) | (1<<21);  // LEDs OFF
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -157,26 +226,86 @@ int main(void)
   MX_ADC1_Init();
   MX_TIM1_Init();
   MX_USART3_UART_Init();
-  MX_TIM3_Init();
   MX_TIM4_Init();
+  MX_UART4_Init();
+  MX_USART2_UART_Init();
+  MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-  // Start Timer3 in encoder mode
-  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
   
-  // Start Timer4 in encoder mode
-  HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
+  // CRITICAL: Enable FPU before FreeRTOS starts
+  // This MUST be done before any FPU operations
+  #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
+  SCB->CPACR |= ((3UL << 10*2) | (3UL << 11*2));  // Set CP10 and CP11 Full Access
+  #endif
+
+#if 0
+  // Stage 1: Boot indicator (RED)
+  HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+  HAL_Delay(200);
+  HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+  HAL_Delay(200);
   
-  // Task Manager 초기화 (UART3 and SPI1)
-  pTaskManager = new task_class(&huart3, &hspi1);
+  // Stage 2: Before USB init (GREEN 1 blink)
+  HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+  HAL_Delay(200);
+  HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+  HAL_Delay(200);
+  
+  // Initialize USB - DISABLED until FreeRTOS works
+  //MX_USB_DEVICE_Init();
+  
+  // Stage 3: After USB init (GREEN 2 blinks)
+  for(int i=0; i<2; i++) {
+    HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+    HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+    HAL_Delay(100);
+  }
+  
+  HAL_Delay(1000);  // Wait for USB enumeration
+  
+  // Stage 4: USB ready (GREEN 3 blinks)
+  for(int i=0; i<3; i++) {
+    HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+    HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+    HAL_Delay(100);
+  }
+#endif
+  
+  // Timer3/4 disabled - not configured in .ioc
+  // HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
+  // HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
+  
+//  // RED 1 blink: Before TaskManager
+//  HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+//  HAL_Delay(100);
+//  HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+//  HAL_Delay(100);
+  
+  // Task Manager 초기??(UART3 and SPI1) - TEMPORARILY DISABLED
+  //pTaskManager = new task_class(&huart3, &hspi1);
+  pTaskManager = nullptr;  // Skip TaskManager for now
+  
+  // RED 2 blinks: After TaskManager
+  for(int i=0; i<2; i++) {
+    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+    HAL_Delay(100);
+  }
   
   // Test printf statements (will output via USB CDC)
   printf("\r\n=== STM32 Micro-ROS System Starting ===\r\n");
-  printf("Encoder Timer3 (Motor1): Started\r\n");
-  printf("Encoder Timer4 (Motor2): Started\r\n");
-  printf("Task Manager: Initialized\r\n");
-  printf("System Clock: %lu Hz\r\n", HAL_RCC_GetHCLKFreq());
-  printf("UART3: Reserved for micro-ros agent\r\n");
-  printf("=======================================\r\n\r\n");
+  
+  // RED 3 blinks: After printf
+  for(int i=0; i<3; i++) {
+    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+    HAL_GPIO_WritePin(LED_RED_GPIO_Port, LED_RED_Pin, GPIO_PIN_RESET);
+    HAL_Delay(100);
+  }
+  
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -195,10 +324,25 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  // Initialize queues
-  if (pTaskManager != nullptr) {
-    pTaskManager->initQueues();
+  printf("Before queue init\r\n");
+  
+  // Initialize TaskManager BEFORE creating any tasks
+  printf("Initializing TaskManager...\r\n");
+  task_class::instance = new task_class(
+    &huart2,  // UART2 for micro-ROS agent (921600 baud)
+    &hspi1    // SPI for IMU sensor
+  );
+  
+  if (task_class::instance != nullptr) {
+    printf("TaskManager initialized at: %p\r\n", task_class::instance);
+    printf("Initializing TaskManager queues\r\n");
+    task_class::instance->initQueues();
+  } else {
+    printf("ERROR: TaskManager initialization failed!\r\n");
+    Error_Handler();
   }
+  
+  printf("Creating defaultTask...\r\n");
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -208,14 +352,45 @@ int main(void)
   /* USER CODE BEGIN RTOS_THREADS */
   // All tasks created in USER CODE block (protected from CubeMX regeneration)
   
-  /* creation of MicroRosTask */
-  microRosTaskHandle = osThreadNew(task_class::microRosTaskWrapper, NULL, &microRosTask_attributes);
-  
-  /* creation of ControlTask */
-  controlTaskHandle = osThreadNew(task_class::controlTaskWrapper, NULL, &controlTask_attributes);
+  BaseType_t result;
   
   /* creation of SensorTask */
-  sensorTaskHandle = osThreadNew(task_class::sensorTaskWrapper, NULL, &sensorTask_attributes);
+  printf("Creating SensorTask...\r\n");
+  result = xTaskCreate(
+    task_class::sensorTaskWrapper,
+    sensorTask_attributes.name,
+    sensorTask_attributes.stack_size / sizeof(StackType_t),
+    NULL,
+    (UBaseType_t)sensorTask_attributes.priority,
+    (TaskHandle_t*)&sensorTaskHandle
+  );
+  printf("SensorTask result: %ld\r\n", result);
+  
+  /* creation of ControlTask */
+  printf("Creating ControlTask...\r\n");
+  result = xTaskCreate(
+    task_class::controlTaskWrapper,
+    controlTask_attributes.name,
+    controlTask_attributes.stack_size / sizeof(StackType_t),
+    NULL,
+    (UBaseType_t)controlTask_attributes.priority,
+    (TaskHandle_t*)&controlTaskHandle
+  );
+  printf("ControlTask result: %ld\r\n", result);
+  
+  /* creation of MicroRosTask */
+  printf("Creating MicroRosTask...\r\n");
+  result = xTaskCreate(
+    task_class::microRosTaskWrapper,
+    microRosTask_attributes.name,
+    microRosTask_attributes.stack_size / sizeof(StackType_t),
+    NULL,
+    (UBaseType_t)microRosTask_attributes.priority,
+    (TaskHandle_t*)&microRosTaskHandle
+  );
+  printf("MicroRosTask result: %ld\r\n", result);
+  
+  printf("All tasks created\r\n");
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -231,6 +406,8 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+     printf("main_loop (ERROR: should not be here)\r\n");
+     HAL_Delay(1000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -261,10 +438,10 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 8;
-  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 72;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLQ = 3;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -314,7 +491,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 10;
+  hadc1.Init.NbrOfConversion = 7;
   hadc1.Init.DMAContinuousRequests = DISABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
@@ -334,7 +511,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Channel = ADC_CHANNEL_8;
   sConfig.Rank = 2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -343,7 +520,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Channel = ADC_CHANNEL_9;
   sConfig.Rank = 3;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -352,7 +529,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_3;
+  sConfig.Channel = ADC_CHANNEL_10;
   sConfig.Rank = 4;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -361,7 +538,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_8;
+  sConfig.Channel = ADC_CHANNEL_11;
   sConfig.Rank = 5;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -370,7 +547,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_9;
+  sConfig.Channel = ADC_CHANNEL_12;
   sConfig.Rank = 6;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -379,38 +556,8 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_10;
-  sConfig.Rank = 7;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_11;
-  sConfig.Rank = 8;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_12;
-  sConfig.Rank = 9;
-  sConfig.SamplingTime = ADC_SAMPLETIME_15CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
   sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
-  sConfig.Rank = 10;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  sConfig.Rank = 7;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -539,55 +686,6 @@ static void MX_TIM1_Init(void)
 }
 
 /**
-  * @brief TIM3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM3_Init(void)
-{
-
-  /* USER CODE BEGIN TIM3_Init 0 */
-
-  /* USER CODE END TIM3_Init 0 */
-
-  TIM_Encoder_InitTypeDef sConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-
-  /* USER CODE BEGIN TIM3_Init 1 */
-
-  /* USER CODE END TIM3_Init 1 */
-  htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 0;
-  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 65535;
-  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
-  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
-  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
-  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
-  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
-  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
-  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
-  if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM3_Init 2 */
-
-  /* USER CODE END TIM3_Init 2 */
-
-}
-
-/**
   * @brief TIM4 Initialization Function
   * @param None
   * @retval None
@@ -637,6 +735,72 @@ static void MX_TIM4_Init(void)
 }
 
 /**
+  * @brief UART4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_UART4_Init(void)
+{
+
+  /* USER CODE BEGIN UART4_Init 0 */
+
+  /* USER CODE END UART4_Init 0 */
+
+  /* USER CODE BEGIN UART4_Init 1 */
+
+  /* USER CODE END UART4_Init 1 */
+  huart4.Instance = UART4;
+  huart4.Init.BaudRate = 115200;
+  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.StopBits = UART_STOPBITS_1;
+  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Mode = UART_MODE_TX_RX;
+  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART4_Init 2 */
+
+  /* USER CODE END UART4_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 921600;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * @brief USART3 Initialization Function
   * @param None
   * @retval None
@@ -666,6 +830,39 @@ static void MX_USART3_UART_Init(void)
   /* USER CODE BEGIN USART3_Init 2 */
 
   /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
+  * @brief USART6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART6_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART6_Init 0 */
+
+  /* USER CODE END USART6_Init 0 */
+
+  /* USER CODE BEGIN USART6_Init 1 */
+
+  /* USER CODE END USART6_Init 1 */
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 115200;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART6_Init 2 */
+
+  /* USER CODE END USART6_Init 2 */
 
 }
 
@@ -728,22 +925,49 @@ void StartDefaultTask(void *argument)
   /* init code for USB_DEVICE */
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 5 */
-  // Wait for USB to initialize
-  osDelay(1000);
   
-  // Test USB CDC printf (printf now outputs to USB)
-  printf("\r\n=== USB CDC Connected ===\r\n");
-  printf("STM32F405 Micro-ROS System\r\n");
-  printf("Dual Motor Encoder System\r\n");
-  printf("Timer3: Motor1, Timer4: Motor2\r\n");
-  printf("========================\r\n\r\n");
+  printf("\r\n=== FreeRTOS Started Successfully! ===\r\n");
+  printf("Task: defaultTask\r\n");
+  printf("Stack size: 1024 bytes\r\n");
+  printf("Heap free: %u bytes\r\n", xPortGetFreeHeapSize());
+  printf("System monitoring task running\r\n");
+  printf("=====================================\r\n\r\n");
+  
+  uint32_t counter = 0;
   
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    // Print system status
+    printf("[SYS] Tick: %lu, Heap: %u, Count: %lu\r\n", 
+           xTaskGetTickCount(), xPortGetFreeHeapSize(), counter++);
+    
+    // 1 second delay
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
   /* USER CODE END 5 */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM2 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM2)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
 }
 
 /**
@@ -755,8 +979,17 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
+  
+  // Visual error indication - fast blink on PC4, PC5
+  RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+  GPIOC->MODER |= (1<<8) | (1<<10);  // PC4, PC5 output
+  
   while (1)
   {
+    GPIOC->BSRR = (1<<4) | (1<<5);   // ON
+    for(volatile int i=0; i<100000; i++);
+    GPIOC->BSRR = (1<<20) | (1<<21); // OFF
+    for(volatile int i=0; i<100000; i++);
   }
   /* USER CODE END Error_Handler_Debug */
 }
