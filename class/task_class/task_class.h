@@ -11,6 +11,8 @@
 extern "C" {
 #include "cmsis_os.h"
 #include "main.h"
+#include <string.h>
+#include <stdio.h>
 }
 
 #include "../microros_class/microros_class.h"

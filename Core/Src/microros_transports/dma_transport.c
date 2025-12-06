@@ -49,15 +49,25 @@ size_t cubemx_transport_write(struct uxrCustomTransport* transport, uint8_t * bu
 size_t cubemx_transport_read(struct uxrCustomTransport* transport, uint8_t* buf, size_t len, int timeout, uint8_t* err){
     UART_HandleTypeDef * uart = (UART_HandleTypeDef*) transport->args;
 
+    // Aggressive timeout limiting - max 20ms per read attempt
+    if (timeout > 20) {
+        timeout = 20;
+    }
+
     int ms_used = 0;
     do
     {
         __disable_irq();
         dma_tail = UART_DMA_BUFFER_SIZE - __HAL_DMA_GET_COUNTER(uart->hdmarx);
         __enable_irq();
+        
+        if (dma_head != dma_tail) {
+            break;  // Data available
+        }
+        
+        osDelay(1);  // 1ms delay, yield to other tasks
         ms_used++;
-        osDelay(portTICK_RATE_MS);
-    } while (dma_head == dma_tail && ms_used < timeout);
+    } while (ms_used < timeout);
     
     size_t wrote = 0;
     while ((dma_head != dma_tail) && (wrote < len)){

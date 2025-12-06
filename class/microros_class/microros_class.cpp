@@ -26,6 +26,7 @@ microros_class::microros_class(UART_HandleTypeDef* uart, const char* node_name,
       pub_topic_name(pub_topic), sub_topic_name(sub_topic),
       cmd_vel_topic_name(cmd_vel_topic),
       initialized(false), 
+      transport_configured(false),
       has_subscriber(sub_topic != nullptr),
       has_cmd_vel_subscriber(cmd_vel_topic != nullptr),
       user_callback(nullptr),
@@ -47,46 +48,48 @@ microros_class::~microros_class() {
 }
 
 bool microros_class::init() {
-    printf("[MICROROS] Setting up UART transport...\r\n");
-    
-    // Set custom transport for UART
-    rmw_uros_set_custom_transport(
-        true,
-        (void *) huart,
-        cubemx_transport_open,
-        cubemx_transport_close,
-        cubemx_transport_write,
-        cubemx_transport_read);
-    
-    printf("[MICROROS] Transport configured\r\n");
+    // Setup transport and allocator only once
+    if (!transport_configured) {
+        printf("[MICROROS] Setting up UART transport...\r\n");
+        
+        // Set custom transport for UART
+        rmw_uros_set_custom_transport(
+            true,
+            (void *) huart,
+            cubemx_transport_open,
+            cubemx_transport_close,
+            cubemx_transport_write,
+            cubemx_transport_read);
+        
+        printf("[MICROROS] Transport configured\r\n");
 
-    // Set FreeRTOS allocator
-    printf("[MICROROS] Setting up FreeRTOS allocator...\r\n");
-    rcl_allocator_t freeRTOS_allocator = rcutils_get_zero_initialized_allocator();
-    freeRTOS_allocator.allocate = microros_allocate;
-    freeRTOS_allocator.deallocate = microros_deallocate;
-    freeRTOS_allocator.reallocate = microros_reallocate;
-    freeRTOS_allocator.zero_allocate = microros_zero_allocate;
+        // Set FreeRTOS allocator
+        printf("[MICROROS] Setting up FreeRTOS allocator...\r\n");
+        rcl_allocator_t freeRTOS_allocator = rcutils_get_zero_initialized_allocator();
+        freeRTOS_allocator.allocate = microros_allocate;
+        freeRTOS_allocator.deallocate = microros_deallocate;
+        freeRTOS_allocator.reallocate = microros_reallocate;
+        freeRTOS_allocator.zero_allocate = microros_zero_allocate;
 
-    if (!rcutils_set_default_allocator(&freeRTOS_allocator)) {
-        printf("[MICROROS] ERROR: Failed to set allocator\r\n");
-        return false;
+        if (!rcutils_set_default_allocator(&freeRTOS_allocator)) {
+            printf("[MICROROS] ERROR: Failed to set allocator\r\n");
+            return false;
+        }
+        printf("[MICROROS] Allocator configured\r\n");
+
+        // Get default allocator
+        allocator = rcl_get_default_allocator();
+        
+        transport_configured = true;
     }
-    printf("[MICROROS] Allocator configured\r\n");
 
-    // Get default allocator
-    allocator = rcl_get_default_allocator();
-
-    // Set client key to 20
-    printf("[MICROROS] Setting client key to 20...\r\n");
-    rmw_uros_options_set_client_key(20, (void *) huart);
-
-    // Create init_options and wait for agent connection
-    printf("[MICROROS] Waiting for ROS2 agent connection...\r\n");
+    // Direct init attempt - will fail fast via transport timeout (100ms max per read)
+    // No ping needed - transport layer timeout limiting handles it
+    printf("[MICROROS] Attempting connection (fast timeout)...\r\n");
     rcl_ret_t ret = rclc_support_init(&support, 0, NULL, &allocator);
     
     if (ret != RCL_RET_OK) {
-        printf("[MICROROS] ERROR: Agent connection failed (ret=%d)\r\n", ret);
+        printf("[MICROROS] ERROR: Agent connection failed (ret=%ld)\r\n", ret);
         return false;
     }
     printf("[MICROROS] Agent connected!\r\n");
@@ -95,7 +98,7 @@ bool microros_class::init() {
     printf("[MICROROS] Creating ROS2 node...\r\n");
     ret = rclc_node_init_default(&node, node_name, "", &support);
     if (ret != RCL_RET_OK) {
-        printf("[MICROROS] ERROR: Node creation failed (ret=%d)\r\n", ret);
+        printf("[MICROROS] ERROR: Node creation failed (ret=%ld)\r\n", ret);
         return false;
     }
     printf("[MICROROS] Node created: %s\r\n", node_name);

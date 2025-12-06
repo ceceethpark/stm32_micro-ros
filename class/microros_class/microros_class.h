@@ -31,6 +31,7 @@ private:
     rcl_allocator_t allocator;
     rcl_node_t node;
     rclc_executor_t executor;
+    bool transport_configured;
     
     // Publisher
     rcl_publisher_t publisher;

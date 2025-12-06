@@ -22,8 +22,8 @@ STM32F405RGT6 기반 micro-ROS 로봇 제어 시스템 프로젝트입니다. Fr
 - **과전류 보호**: ADC 기반 실시간 전류 모니터링 (PB0, PB1)
 
 ### 엔코더
-- **Timer3**: Motor1 엔코더 (PC6/PC7)
-- **Timer4**: Motor2 엔코더
+- **Timer3**: Motor1 엔코더 (PC6/PC7, CH1/CH2)
+- **Timer4**: Motor2 엔코더 (CH1/CH2)
 - **사양**: PPR 1000, CPR 4000
 - **기능**: RPM 측정 및 실시간 퍼블리싱
 
@@ -41,6 +41,19 @@ STM32F405RGT6 기반 micro-ROS 로봇 제어 시스템 프로젝트입니다. Fr
 - Blink 기능 지원
 
 ## 소프트웨어 아키텍처
+
+### Python 브리지 스크립트
+```
+stm32_micro-ros/
+├── serial_bridge.py        # Windows: COM5 ↔ UDP 브리지
+├── bridge_node.py          # WSL: ROS2 topics ↔ UDP (~/ros2_ws/src/stm32_bridge/)
+└── udp_relay.py            # WSL: localhost UDP → Windows IP 릴레이
+```
+
+**실행 순서:**
+1. WSL: `python3 ~/udp_relay.py` (백그라운드)
+2. Windows: `python serial_bridge.py` (COM5 연결 필요)
+3. WSL: `ros2 run stm32_bridge bridge_node`
 
 ### FreeRTOS 태스크
 1. **MicroRosTask** (50ms)
@@ -100,12 +113,12 @@ class/
 - MOSI (PA7): IMU Data Out
 - CS (PA4): IMU Chip Select
 
-### UART2
-- TX (PA2 / U6.16): micro-ROS Agent
-- RX (PA3 / U2.17): micro-ROS Agent
+### UART2 (micro-ROS)
+- TX (PA2 / U6.16): micro-ROS Agent @ 921600 baud
+- RX (PA3 / U6.17): micro-ROS Agent @ 921600 baud
 
-### UART3 (미사용)
-- TX (PB10): Reserved
+### UART3 (Debug)
+- TX (PB10): printf 디버그 출력 @ 115200 baud
 - RX (PB11): Reserved
 
 ### GPIO
@@ -134,25 +147,48 @@ make -j8
 ### 빌드 결과
 ```
 text      data     bss     dec     hex filename
-129956     960   64752  195668   2fc54 stm32_micro-ros.elf
+83252     1064   23432  107748   1a4e4 stm32_micro-ros.elf
 ```
+
+**최적화 내역 (2025.12.06):**
+- DMA 구현으로 코드 크기 감소
+- 불필요한 micro-ROS 컴포넌트 제거
+- Flash: 84316 bytes (82% 절약)
+- RAM: 24496 bytes (62% 절약)
 
 ## micro-ROS 설정
 
 ### Agent 연결
 ```bash
-# UART2 (115200 baud) - U6.16/U2.17
-ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
+# UART2 (921600 baud) - PA2/PA3
+MicroXRCEAgent serial --dev /dev/ttyUSB0 -b 921600 --key 20 -v6
 
-# Docker 사용
-docker run -it --rm --device=/dev/ttyUSB0 microros/micro-ros-agent:humble serial --dev /dev/ttyUSB0 -b 115200
+# 또는 Docker 사용
+docker run -it --rm --device=/dev/ttyUSB0 microros/micro-ros-agent:humble serial --dev /dev/ttyUSB0 -b 921600
 ```
 
 ### ROS2 토픽
-- Subscribe: `/cmd_vel` (geometry_msgs/Twist)
+- Subscribe: `/cmd_vel` (geometry_msgs/Twist) - ✅ **구현 완료**
+- Publish: `/imu/data` (JSON via UART2) - ✅ **구현 완료** @ 5Hz
 - Publish: `/debug_counter` (std_msgs/Int32)
-- Publish: `/imu/data` (sensor_msgs/Imu) - TODO
 - Publish: `/encoder/rpm` (custom) - TODO
+
+### 통신 아키텍처 (Bidirectional)
+```
+ROS2 Node (WSL)
+    ↕ (ROS2 topics)
+bridge_node.py (WSL)
+    ↕ (UDP 8888/8889 via localhost)
+udp_relay.py (WSL)
+    ↕ (UDP 8889 to Windows IP:8889)
+serial_bridge.py (Windows)
+    ↕ (COM5 @ 921600 baud, JSON)
+STM32 UART2 (DMA TX/RX)
+    ↕
+Bridge Task (FreeRTOS)
+    → JSON parsing → cmd_vel Queue → Control Task → Motors
+    ← Sensor Queue ← Sensor Task ← IMU
+```
 
 ## 디버그
 
@@ -180,11 +216,13 @@ int _write(int32_t file, uint8_t *ptr, int32_t len) {
 ```
 
 ### 통신 포트 할당
-- **UART2**: micro-ROS Agent 전용 (115200 baud)
-  - TX: U2TX (U6.16)
-  - RX: U2RX (U2.17)
-- **UART3**: 사용 안 함 (이전: micro-ROS Agent)
-- **SWO (PB3)**: printf 디버그 출력 (U6.55)
+- **UART2**: micro-ROS Agent 전용 (921600 baud)
+  - TX: PA2 (U6.16)
+  - RX: PA3 (U2.17)
+- **UART3**: printf 디버그 출력 (115200 baud)
+  - TX: PB10
+  - RX: PB11
+- **SWO (PB3)**: 사용 안 함 (이전: printf 디버그 출력)
 
 ## WSL2 환경 설정
 
@@ -474,8 +512,15 @@ ros2 node info /stm32_node
 # STM32로 Int32 데이터 전송
 ros2 topic pub /int32_subscriber std_msgs/msg/Int32 "{data: 100}"
 
-# cmd_vel 명령 전송
+# cmd_vel 명령 전송 (전진)
 ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+
+# cmd_vel 명령 전송 (회전)
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 1.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.5}}"
+
+# 실제 동작 확인 (STM32 콘솔):
+# [BRIDGE] cmd_vel: L=1.00, A=0.50  (50번마다)
+# [CONTROL] cmd_vel: L=0.93, R=1.08  (좌우 모터 속도)
 ```
 
 ## 개발 이력
@@ -508,7 +553,7 @@ ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5, y: 0.0, z: 0.
 - printf를 SWO(PB3)로 변경하여 UART 충돌 해결 (U6.55)
 
 ### 2025.12.04
-- UART 재설정: UART2(micro-ROS, 921600), UART6(printf)
+- UART 재설정: UART2(micro-ROS, 921600), UART3(printf, 115200), Timer3(Encoder)
 - micro-ROS client key 20 설정
 - WSL2 MicroXRCEAgent 설치 및 설정
 - ROS2 Jazzy 설치 (Ubuntu 24.04)
@@ -524,6 +569,30 @@ ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5, y: 0.0, z: 0.
   - ROS2 버전 호환성 해결: 192.168.0.101 (Humble) ↔ WSL 192.168.0.65 (Humble)
   - Multicast 기반 노드 디스커버리 정상 작동 확인
   - 중복 노드 문제 발견: 192.168.0.101이 eth0 + wlan0 동시 사용으로 인한 이슈
+
+### 2025.12.06
+- **양방향 ROS2-STM32 통신 완성** 🎉
+  - **STM32 → ROS2**: IMU 데이터 JSON 송신 @ 5Hz via UART2 DMA TX
+  - **ROS2 → STM32**: cmd_vel JSON 수신 @ 10Hz via UART2 DMA RX
+- **DMA Circular Buffer 구현**
+  - UART2 RX를 DMA Circular Buffer로 전환 (512 bytes)
+  - 고속 안정적 수신 (921600 baud, Byte 모드)
+  - Overrun 방지 및 실시간 JSON 파싱
+- **Windows-WSL 브리지 아키텍처**
+  - `serial_bridge.py` (Windows): COM5 ↔ UDP 8888/8889
+  - `bridge_node.py` (WSL ROS2): ROS2 topics ↔ UDP
+  - `udp_relay.py` (WSL): localhost:8889 → Windows IP:8889 (bridged mode 네트워크 격리 해결)
+- **Differential Drive 계산 구현**
+  - cmd_vel (linear, angular) → 좌우 모터 속도 자동 계산
+  - Wheel base: 0.15m
+  - Control Task에서 실시간 모터 제어
+- **빌드 최적화**
+  - GCC 플래그 호환성 문제 해결 (`-fcyclomatic-complexity` 제거)
+  - 최종 빌드: 83252 text, 1064 data, 23432 bss (107748 bytes total)
+- **안정성 검증**
+  - 360초 이상 무중단 운영 확인
+  - 메모리 누수 없음 (Heap 3536 일정 유지)
+  - IMU 송신 1790+ 회, cmd_vel 수신/처리 정상
 
 ## 트러블슈팅
 

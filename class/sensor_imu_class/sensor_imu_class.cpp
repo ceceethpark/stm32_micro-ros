@@ -39,8 +39,14 @@ uint8_t sensor_imu_class::readRegister(uint8_t reg)
     uint8_t rx_data = 0;
     
     csLow();
-    HAL_SPI_Transmit(hspi, &tx_data, 1, 100);
-    HAL_SPI_Receive(hspi, &rx_data, 1, 100);
+    if (HAL_SPI_Transmit(hspi, &tx_data, 1, 10) != HAL_OK) {
+        csHigh();
+        return 0;
+    }
+    if (HAL_SPI_Receive(hspi, &rx_data, 1, 10) != HAL_OK) {
+        csHigh();
+        return 0;
+    }
     csHigh();
     
     return rx_data;
@@ -53,7 +59,7 @@ void sensor_imu_class::writeRegister(uint8_t reg, uint8_t value)
     tx_data[1] = value;
     
     csLow();
-    HAL_SPI_Transmit(hspi, tx_data, 2, 100);
+    HAL_SPI_Transmit(hspi, tx_data, 2, 10);
     csHigh();
 }
 
@@ -62,8 +68,11 @@ void sensor_imu_class::readRegisters(uint8_t reg, uint8_t* buffer, uint8_t lengt
     uint8_t tx_data = reg | 0x80;  // Read: set MSB to 1
     
     csLow();
-    HAL_SPI_Transmit(hspi, &tx_data, 1, 100);
-    HAL_SPI_Receive(hspi, buffer, length, 100);
+    if (HAL_SPI_Transmit(hspi, &tx_data, 1, 10) != HAL_OK) {
+        csHigh();
+        return;
+    }
+    HAL_SPI_Receive(hspi, buffer, length, 10);
     csHigh();
 }
 
@@ -73,10 +82,11 @@ bool sensor_imu_class::init()
     csHigh();
     HAL_Delay(10);
     
-    // Check WHO_AM_I
+    // Check WHO_AM_I (with timeout protection)
     uint8_t whoami = getWhoAmI();
-    if (whoami != ICM42670_WHO_AM_I_VALUE) {
-        return false;  // Wrong device ID
+    if (whoami == 0 || whoami != ICM42670_WHO_AM_I_VALUE) {
+        // SPI communication failed or wrong device ID
+        return false;
     }
     
     // Soft reset
@@ -84,15 +94,14 @@ bool sensor_imu_class::init()
     HAL_Delay(50);
     
     // Power on Accel and Gyro in Low Noise mode
-    // Accel: Low Noise, Gyro: Low Noise
     writeRegister(ICM42670_PWR_MGMT0, 0x0F);
     HAL_Delay(50);
     
     // Configure Accel: ±16g, ODR 1kHz
-    writeRegister(ICM42670_ACCEL_CONFIG0, 0x06);  // ±16g range, ODR 1kHz
+    writeRegister(ICM42670_ACCEL_CONFIG0, 0x06);
     
     // Configure Gyro: ±2000dps, ODR 1kHz
-    writeRegister(ICM42670_GYRO_CONFIG0, 0x06);   // ±2000dps range, ODR 1kHz
+    writeRegister(ICM42670_GYRO_CONFIG0, 0x06);
     
     HAL_Delay(50);
     
