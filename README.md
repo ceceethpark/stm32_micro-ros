@@ -55,6 +55,15 @@ stm32_micro-ros/
 2. Windows: `python serial_bridge.py` (COM5 연결 필요)
 3. WSL: `ros2 run stm32_bridge bridge_node`
 
+**⚠️ RMW 설정 (중요):**
+- WSL과 ROS2 시스템 간 통신을 위해 **동일한 RMW 구현체** 사용 필요
+- micro-ROS agent (라즈베리파이 101): `rmw_fastrtps_cpp`
+- WSL `~/.bashrc`에 다음 추가:
+  ```bash
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+  ```
+- RMW 불일치 시 토픽은 보이지만 실제 데이터 전달 안 됨
+
 ### FreeRTOS 태스크
 1. **MicroRosTask** (50ms)
    - ROS2 통신 처리
