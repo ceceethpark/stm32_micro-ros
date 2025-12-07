@@ -624,6 +624,27 @@ ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 1.0, y: 0.0, z: 0.
   1. WiFi 비활성화: `sudo rfkill block wifi`
   2. Cyclone DDS에서 eth0만 사용하도록 설정
 
+#### 문제 4: 컴퓨터간 pub/sub는 되지만 실제 Pi(101)에 micro-ROS로 연결된 자동차는 안 돌아감
+- **증상**: WSL(192.168.0.65)과 다른 컴퓨터(192.168.0.154) 간 ROS2 통신은 정상이지만, 라즈베리파이(192.168.0.101) 자동차가 cmd_vel 명령에 반응하지 않음
+- **원인**: 라즈베리파이의 micro-ROS agent가 `rmw_fastrtps_cpp`를 사용하는데, WSL은 `rmw_cyclonedds_cpp`를 사용하여 RMW 구현체 불일치
+- **해결**: WSL(192.168.0.65)의 RMW 구현체를 `rmw_fastrtps_cpp`로 변경
+  ```bash
+  # WSL ~/.bashrc 수정
+  # 기존: export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+  # 변경: export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+  
+  # FastRTPS 패키지 설치 (없는 경우)
+  sudo apt install ros-humble-rmw-fastrtps-cpp
+  
+  # bashrc 수정
+  sed -i 's/rmw_cyclonedds_cpp/rmw_fastrtps_cpp/g' ~/.bashrc
+  source ~/.bashrc
+  
+  # 확인
+  echo $RMW_IMPLEMENTATION  # 출력: rmw_fastrtps_cpp
+  ```
+- **결과**: WSL, 다른 컴퓨터, 라즈베리파이 자동차 모두 동일한 RMW 구현체 사용으로 정상 통신
+
 #### 최종 성공 구성
 ```
 Windows 10
